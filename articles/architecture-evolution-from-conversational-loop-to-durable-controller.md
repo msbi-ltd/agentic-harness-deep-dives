@@ -202,6 +202,46 @@ unclassifiable result fails closed rather than being treated as a pass.
 
 This is difficult to express reliably when the orchestration state exists mostly as instructions inside one ongoing conversation. It becomes straightforward when the states are data.
 
+## Waiting for CI should not require an LLM
+
+There is a practical cost benefit to this boundary. In the conversational loop,
+checking whether CI has finished can mean another agent turn: read the checks,
+interpret the status, decide to wait and arrange another wake-up. Each such turn
+uses model tokens even when there is no engineering decision to make.
+
+In the target architecture, that work is ordinary software. The implementation
+worker pushes, returns the PR number and exact head SHA, and exits. When the
+candidate is admitted to full CI, the controller persists the wait and associated
+run identifiers. Subsequent timer ticks query GitHub and apply the configured
+transition rules. No model invocation is needed to read a queued, running or
+completed status.
+
+| CI observation | Controller action | Model work |
+|---|---|---|
+| Queued or running | Persist the wait; check again on a later tick | None |
+| Passed for the expected SHA | Advance when the other required evidence permits | None for the status decision |
+| Recognised transient infrastructure failure | Schedule a bounded retry using a supported provider operation | Usually none |
+| Test or build failure needing investigation | Dispatch a bounded diagnosis or repair worker with relevant logs | Yes |
+| Missing or ambiguous evidence | Record could-not-assess and apply bounded recovery policy | Only if investigation requires it |
+
+External waits release worker capacity, although the delivery still counts
+towards the controller's overall work-in-progress limits. After a controller
+restart, the stored PR, SHA and run identifiers allow monitoring to resume. A pass
+on an old commit cannot qualify a replacement candidate.
+
+This removes model calls from routine monitoring, not the cost of CI itself.
+Controller ticks still consume CPU, memory, storage and GitHub API quota.
+Diagnosis, implementation and review still use model tokens. Provider permissions
+also remain real constraints: moving a retry into Python does not grant the
+credential permission to rerun a GitHub workflow. An unsupported retry must remain
+visible rather than becoming an unbounded sequence of empty-commit pushes.
+
+**This is an intended benefit of the worker-dispatch and review/CI phases, not a
+measured saving from Phase 1.** The observe-only controller does not yet replace
+the incumbent loop's CI monitoring. Evaluation should distinguish model usage for
+routine orchestration from diagnosis and repair, alongside CI retries and
+time-to-completion. A quieter agent session alone is not proof of cheaper delivery.
+
 ## What changed in reviewer identity enforcement
 
 The earlier [double-loop case study](enforcing-the-double-loop-for-agents.md)
