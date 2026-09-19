@@ -414,9 +414,7 @@ This avoids combining two risky changes:
 
 The extraction criterion should be evidence-based: once the revised role/provider boundary completes a representative OpsWarden delivery cycle without OpsWarden leakage into the generic core, extraction can become its own programme with a new board.
 
-The authoritative implementation architecture lives with the product code:
-
-[Role- and provider-aware durable delivery controller architecture](https://github.com/msbi-ltd/opswarden/blob/main/docs/architecture/role-provider-aware-durable-delivery-controller.md)
+The detailed implementation architecture is maintained with the product code in a private repository and is intentionally not linked from this public article.
 
 ## Do we need Temporal?
 
