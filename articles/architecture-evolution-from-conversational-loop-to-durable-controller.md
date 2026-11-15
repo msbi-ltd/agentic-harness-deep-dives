@@ -1,6 +1,8 @@
 # From conversational loop to durable controller
 
 > **Implementation status, verified 2026-08-31.** The observe-only Phase 1 controller described here is implemented and running on a timer on a real host. It persists decisions but cannot dispatch workers. The merge-join executor is exercised in dry-run mode behind a backend that refuses to merge. Later phases remain work in progress. This article separates those shipped boundaries from the target architecture.
+>
+> **Update, 2026-11-15.** The later phases have since shipped and the conversational loop is retired. The body below is kept as the dated record of Phase 1. [What was built afterwards](#postscript-november-2026-what-was-built-afterwards) is at the end.
 
 ## The short version
 
@@ -202,6 +204,45 @@ unclassifiable result fails closed rather than being treated as a pass.
 
 This is difficult to express reliably when the orchestration state exists mostly as instructions inside one ongoing conversation. It becomes straightforward when the states are data.
 
+## Waiting for CI should not require an LLM
+
+There is a practical cost benefit to this boundary. In the conversational loop,
+checking whether CI has finished can mean another agent turn: read the checks,
+interpret the status, decide to wait and arrange another wake-up. Each such turn
+uses model tokens even when there is no engineering decision to make.
+
+In the target architecture, that work is ordinary software. The implementation
+worker pushes, returns the PR number and exact head SHA, and exits. The
+controller persists the wait and the identifiers it needs to resume it.
+Subsequent timer ticks query GitHub and apply the configured transition rules.
+No model invocation is needed to read a queued, running or completed status.
+
+| CI observation | Controller action | Model work |
+|---|---|---|
+| Queued or running | Persist the wait; check again on a later tick | None |
+| Passed for the expected SHA | Advance when the other required evidence permits | None for the status decision |
+| Recognised transient infrastructure failure | Schedule a bounded retry using a supported provider operation | Usually none |
+| Test or build failure needing investigation | Dispatch a bounded diagnosis or repair worker with relevant logs | Yes |
+| Missing or ambiguous evidence | Record could-not-assess and apply bounded recovery policy | Only if investigation requires it |
+
+External waits release worker capacity. After a controller restart, the stored
+PR, SHA and run identifiers allow monitoring to resume. A pass on an old commit
+cannot qualify a replacement candidate.
+
+This removes model calls from routine monitoring, not the cost of CI itself.
+Controller ticks still consume CPU, memory, storage and GitHub API quota.
+Diagnosis, implementation and review still use model tokens. Provider permissions
+also remain real constraints: moving a retry into Python does not grant the
+credential permission to rerun a GitHub workflow. An unsupported retry must remain
+visible rather than becoming an unbounded sequence of empty-commit pushes.
+
+**This benefit is designed, not measured.** Phase 1 only observed, so it could
+not show it. The controller has since replaced the loop's CI monitoring (see the
+postscript), but the source system has not yet compared model usage for routine
+orchestration before and after. An evaluation should separate that usage from
+diagnosis and repair, alongside CI retries and time-to-completion. A quieter
+agent session alone is not proof of cheaper delivery.
+
 ## What changed in reviewer identity enforcement
 
 The earlier [double-loop case study](enforcing-the-double-loop-for-agents.md)
@@ -361,3 +402,149 @@ A production agentic loop needs both sides:
 - durable orchestration.
 
 The companion cookbook pattern, [Durable controller, disposable agent workers](https://github.com/msbi-ltd/agentic-harness-cookbook/blob/main/patterns/durable-controller-agent-workers.md), describes the implementation shape in a shorter reusable form.
+
+## Postscript, November 2026: what was built afterwards
+
+Everything above describes the system as it stood on 2026-08-31, when the
+controller could observe and record but not act. This section records what
+happened next, checked against the source system on 2026-11-15. The body is
+left as written, so the two can be compared.
+
+### The later phases shipped
+
+In early October 2026 the controller stopped being a trial. It now discovers
+released work, admits it under capacity pools, dispatches bounded workers,
+ingests their results, promotes pull requests and mirrors coarse state to the
+project board. The conversational loop, its in-session watchdog and its
+supervisor timer are retired; no chat session is part of the delivery path.
+Observe mode survives only as an emergency and debugging lever.
+
+Each item Phase 1 "does not yet prove" now exists:
+
+| Phase 1 said | What exists now |
+|---|---|
+| no agent dispatch | Automatic dispatch of bounded workers from work a person has released on the board |
+| no automatic retries around workers | A bounded retry ladder. Substantive failures spend a small count. Infrastructure failures are bounded by repetition and elapsed time instead, after an outage spent the allowance of every work item it touched |
+| no model-routing enforcement | Each result records the requested and the actual role, provider and profile, and the model that ran. A mismatch is visible in the record |
+| a merge backend that refuses to merge | The controller merges a pull request itself when a short list of conditions is proven on the current head. Everything else waits for a person |
+
+Two details in the body turned out differently. The capacity pools are smaller
+than the example shown, and there is no pool or controller state for the full
+CI suite. The idea of admitting only a review-clean candidate to the expensive
+suite was kept, but built another way: review converges while the pull request
+is a draft, and the controller's promotion from draft to ready starts the full
+suite once. The state graph in the body was never implemented as drawn. The
+real states follow what the controller can observe from outside (the board
+column, the pull request's draft flag, review and CI results), plus explicit
+states for "held for a person" and "parked after bounded retries".
+
+### Role is controller policy; subagent is provider implementation
+
+The largest design change after Phase 1 was the shape of the worker boundary.
+The first dispatch design modelled fine-grained steps. It was retired in favour
+of a coarse contract that separates **semantic roles** from runtime entities.
+
+A role is part of the delivery model and survives a change of provider:
+implementer, reviewer, architect, tester, specifier, diagnostician and
+acceptance verifier. A role earns its place by creating a stable difference in
+authority, routing, evidence, tool access or independence, not because a human
+team has that job title. A subagent, by contrast, is an implementation detail
+of whichever provider runs the role.
+
+The controller dispatches a work unit that names a role, a provider and an
+execution profile:
+
+```text
+WorkUnit
+- workflow / ticket identity
+- immutable repository revision
+- semantic role
+- selected provider
+- execution profile
+- scope and allowed write surface
+- acceptance criteria
+- relevant durable decisions
+- tool / authority envelope
+- evidence contract
+- budget / deadline
+```
+
+One provider may execute that with a single process, another with several
+subagents of its own. The controller does not model those mechanics. It does
+enforce policy at the level of the role: an independent reviewer cannot receive
+the authoring credential, cannot write product source, and can be required to
+run on a different provider from the author.
+
+The provider returns one result:
+
+```text
+ResultEnvelope
+- work-unit identity
+- terminal status
+- requested and actual role, provider and profile
+- the model that actually ran
+- resulting revision / pull request
+- evidence references
+- findings
+- failure classification
+- provenance
+```
+
+The invariant that makes this safe is:
+
+> **A provider result must be durably committed before a subsequent controller transition is dispatched.**
+
+Most specialist roles are hosted inside a provider's run. Acceptance
+verification is the exception and is dispatched on its own, so that the party
+checking the acceptance criteria is not the party that wrote the change.
+
+### Not every role is a model
+
+One role added later is not an agent at all. The merger is deterministic code.
+It exists as a role so that merging is scheduled, capacity-limited, retried and
+recorded like any other transition, without giving a model the authority to
+merge.
+
+It merges only when all of these are proven on the head it evaluated: the
+merge policy says yes; the independent reviewer reported no deviation from the
+architecture or from prior agreements; the change carries no architecture
+decision; it is within the size budget with no exception granted; and it
+touches no sensitive path (the controller itself, workflow and policy files,
+guidance files, migrations, authentication and cryptography). If any condition
+is false or cannot be read, the pull request stays in a named hold state with
+that condition recorded, and a person decides.
+
+This is the risk table in "The human boundary becomes risk-based" made
+concrete. The "ordinary: potentially no" row is now "no, when the conditions
+hold". The "control plane: mandatory" row is the sensitive-path condition.
+
+A related gate sits before implementation. A specification that carries an
+architecture decision or changes a prior agreement is held for a person before
+any work starts. Approval applies to a digest of that specification, so a
+specification that changes afterwards returns to review.
+
+### The controller left its first consumer
+
+The body calls the first implementation a "standalone, project-neutral
+package". By November 2026 that became literal: the controller, its project
+adapter, its dashboard and the evaluation code moved to their own repository,
+and the gate code both repositories need is a pinned shared package. The
+product repository keeps its own instance configuration, acceptance policy and
+ledger data.
+
+### What is still not done
+
+- **Temporal, or any workflow engine, is still not adopted.** The small
+  deterministic controller has been enough so far. The question in "Do we need
+  Temporal?" remains open on the same terms.
+- **Sessions outside the controller still need a person to merge.** When an
+  engineer drives an agent session directly, the merge still needs a human
+  approval on every pull request. Work to let such sessions use the same
+  merge conditions is in progress, not finished.
+- **The sensitive-path list is still shared** between the controller and its
+  first consumer. Giving each repository its own list is in progress.
+- **Nothing here is measured yet.** There is no before-and-after comparison of
+  model usage, and no published figure for how often a person has to act per
+  delivered change. A metric for the second is being built. Until those exist,
+  the claims in this postscript are about what the system does, not about how
+  much better it does it.
