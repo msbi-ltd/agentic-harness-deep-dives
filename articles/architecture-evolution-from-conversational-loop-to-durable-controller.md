@@ -438,11 +438,88 @@ real states follow what the controller can observe from outside (the board
 column, the pull request's draft flag, review and CI results), plus explicit
 states for "held for a person" and "parked after bounded retries".
 
+### The first dispatch design over-corrected
+
+The largest design change after Phase 1 was the lower boundary of the
+controller, and it came from a mistake.
+
+The first controller design correctly moved workflow state, scheduling and
+recovery out of the conversation. The implementation programme then began to
+move too much of the cognitive work out as well. Implementation, review,
+diagnosis and specification were becoming fine-grained runtime steps that the
+controller managed directly, and the target diagrams in the body above show
+that shape. That was the wrong place to standardise. The controller needs a
+stable delivery contract. It does not need to recreate the agent runtimes it
+dispatches to.
+
+The rule in the body still holds: an agent may decide how to perform a
+transition, but it should not be the durable authority deciding whether the
+workflow continues. The refinement, reached in September 2026, is its
+counterpart:
+
+> **Moving workflow durability into deterministic software does not imply moving provider-native agent orchestration into it.**
+
+The controller decides what role is required, which provider executes it, what
+authority it receives, what evidence it must return and what durable transition
+follows. The provider decides how that role is carried out, including whether
+it uses its own subagents, tools, internal planning or local review loops.
+
+Three mechanisms answer three different questions:
+
+| Mechanism | Question it answers |
+|---|---|
+| heartbeat | Is execution X still plausibly doing work Y? |
+| provider runtime | How is this role being executed right now? |
+| controller | What durable workflow state exists, and what transition is allowed next? |
+
+Conflating them leads to one of two bad outcomes: elaborate watchdogs around a
+conversational scheduler, which is where the system started, or an
+over-centralised controller that starts recreating the agent runtime, which is
+where the first dispatch design was heading.
+
+```mermaid
+flowchart TD
+    subgraph CP["Durable control plane: deterministic, no model"]
+        S["State store"]
+        Q["Scheduler, leases and global capacity"]
+        E["External events"]
+        P["Policy: role, provider, authority"]
+        D["Decide next durable transition"]
+        S --> D
+        Q --> D
+        E --> D
+        P --> D
+    end
+
+    D --> W["WorkUnit<br/>role · provider · profile · scope · evidence contract"]
+
+    subgraph EP["Execution provider"]
+        R["Instantiate requested role"]
+        N["Provider-native orchestration<br/>planning · tools · subagents · local validation"]
+        R --> N
+    end
+
+    W --> R
+    N --> O["ResultEnvelope<br/>status · evidence · provenance · outputs"]
+    O --> S
+```
+
+The controller owns durable workflow state, external reconciliation, retries
+and recovery, global leases and capacity, risk and authority policy, the role a
+transition requires, provider selection, the identity of the inputs and the
+evidence required, human gates, and merge authority.
+
+The controller does not own subagent creation, provider-specific session
+trees, context-compaction strategy, a provider's planning mechanics, tool-call
+sequencing, or delegation between a worker and its own helpers when that stays
+inside one bounded invocation. A provider invocation remains disposable: if it
+disappears, the durable workflow remains.
+
 ### Role is controller policy; subagent is provider implementation
 
-The largest design change after Phase 1 was the shape of the worker boundary.
-The first dispatch design modelled fine-grained steps. It was retired in favour
-of a coarse contract that separates **semantic roles** from runtime entities.
+The fine-grained dispatch path was retired in favour of a coarse contract that
+separates **semantic roles** from runtime entities. It is now the only dispatch
+path.
 
 A role is part of the delivery model and survives a change of provider:
 implementer, reviewer, architect, tester, specifier, diagnostician and
@@ -498,6 +575,78 @@ Most specialist roles are hosted inside a provider's run. Acceptance
 verification is the exception and is dispatched on its own, so that the party
 checking the acceptance criteria is not the party that wrote the change.
 
+A provider's internal exchanges may be kept by its own harness for
+observability and recovery. The controller does not promote each of them into
+workflow state.
+
+### Two kinds of concurrency
+
+The body's "This still supports parallel agents" section shows the controller
+running implementation, review and specification workers side by side. The
+coarse contract splits that picture in two.
+
+**Global delivery concurrency is the controller's.** It decides how many work
+items may be in implementation, in review and in merge at once, across the
+whole system, through named capacity pools. These are the hard limits that
+protect shared resources.
+
+**Local execution concurrency is the provider's.** Inside one invocation a
+provider may use subagents or internal parallelism, within the authority and
+resource envelope the work unit gave it. The controller can say "run a
+reviewer now, on this provider, under the independent-review profile" without
+knowing whether that provider implements the role with one agent or five.
+
+### What deserves to be durable state
+
+The durable boundary is drawn around facts whose loss or ambiguity could
+change whether the workflow is correct: which work is released, which role is
+running under which lease, what external result is awaited, what is held for a
+person, which revision the evidence is bound to.
+
+Provider-internal conditions such as "the reviewer spawned a specialist" or
+"a subagent is fixing the fourth test" do not become controller states. That
+keeps the distributed state machine small while preserving durability where it
+matters. Inside one running role, a provider may implement, validate locally
+and review its own work before it returns; the controller sees one result.
+
+A changed commit still never inherits evidence bound to an earlier commit, with
+the single proven exception that a head consisting only of merges from the base
+branch, with an identical diff, keeps its review.
+
+### Reviewer independence and routing are still controller policy
+
+The coarse boundary does not weaken reviewer isolation. Review evidence is
+trusted because it was produced by a capability the author does not hold, its
+provenance can be verified, and it is bound to the exact commit being judged.
+The division of labour is:
+
+- the controller decides that an independent reviewer role is required;
+- the controller may require a different provider or capability profile from
+  the author's;
+- the provider executes that role with its own mechanisms;
+- the controller evaluates the returned evidence and authority, not the shape
+  of the provider's internal agent tree.
+
+Provider choice stays with the controller because it affects cost, trust,
+diversity of reasoning and operational limits. A routing policy reads like
+this:
+
+```text
+role=implementer  provider=A  profile=normal
+role=reviewer     provider=B  profile=independent-review
+role=architect    provider=A  profile=deep-reasoning
+```
+
+The provider's harness enforces its own model and tool configuration and
+reports what actually ran; the controller records requested against actual.
+This is how the body's advice to "preserve the routing policy, not the
+historical model pairing" was carried out. It keeps real cross-provider
+diversity without reducing every runtime to the lowest common denominator. It
+is still not a claim that two models reason independently.
+
+The heartbeat contract narrows accordingly: a heartbeat renews the lease of
+one execution. It says nothing about whether the workflow will continue.
+
 ### Not every role is a model
 
 One role added later is not an agent at all. The merger is deterministic code.
@@ -526,11 +675,26 @@ specification that changes afterwards returns to review.
 ### The controller left its first consumer
 
 The body calls the first implementation a "standalone, project-neutral
-package". By November 2026 that became literal: the controller, its project
-adapter, its dashboard and the evaluation code moved to their own repository,
-and the gate code both repositories need is a pinned shared package. The
-product repository keeps its own instance configuration, acceptance policy and
-ledger data.
+package". For its first months that package was still developed inside the
+repository of the product it delivered. That was deliberate. Correcting the
+controller and provider boundary and moving the package to a new repository
+were two risky changes, and doing them together would have made a failure in
+either hard to attribute. The boundary was proved end to end against the first
+consumer before anything moved, and the test for moving was evidence, not a
+date: complete delivery cycles on the revised boundary with nothing specific to
+the product leaking into the generic core.
+
+By November 2026 the move was done. The controller, its project adapter, its
+dashboard and the evaluation code are in their own repository, and the gate
+code both repositories need is a pinned shared package. The product repository
+keeps its own instance configuration, acceptance policy and ledger data.
+
+The work done before the boundary changed was not discarded by it. The
+persisted decisions, bounded ticks, supervised execution, named capacity pools,
+structured outcomes, credential-isolated worker execution that fails closed
+when a credential is missing, and the review-provenance and merge-policy work
+all carried over. What changed was the unit of dispatch and how much of a
+provider's internal execution the controller needs to model.
 
 ### What is still not done
 
