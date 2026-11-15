@@ -27,7 +27,7 @@ The articles build on one another, so this is the best reading order:
 2. [Evals for an agent loop, and the honesty problems in building them](articles/honest-evals-for-an-agent-loop.md) asks how we can tell whether the loop is actually improving. It starts with a metric that reported "100% clean" for six days while reading an empty ledger, then covers the safeguards we added in response.
    - [Building an honest eval ledger and dashboard](articles/building-an-honest-eval-ledger-and-dashboard.md) is the implementation companion, with record schemas, metric definitions, dashboard behaviour and the states a reported number can take.
 
-3. [From conversational loop to durable controller](articles/architecture-evolution-from-conversational-loop-to-durable-controller.md) describes the architecture that followed. The existing controls still helped, but workflow liveness depended on long-lived conversations. The revised design separates worker heartbeat from workflow durability, capability provenance from display identity, and agent work from the protected control plane.
+3. [From conversational loop to durable controller](articles/architecture-evolution-from-conversational-loop-to-durable-controller.md) describes the architecture that followed. The existing controls still helped, but workflow liveness depended on long-lived conversations. The revised design separates worker heartbeat from workflow durability, capability provenance from display identity, and agent work from the protected control plane. A postscript dated November 2026 records what was built after the article was written.
 
 ## Licence and project policies
 
